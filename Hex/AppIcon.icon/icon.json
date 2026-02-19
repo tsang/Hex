@@ -18,17 +18,7 @@
   "groups" : [
     {
       "layers" : [
-        {
-          "image-name" : "Image.png",
-          "name" : "Image",
-          "position" : {
-            "scale" : 0.5,
-            "translation-in-points" : [
-              0,
-              0
-            ]
-          }
-        }
+
       ],
       "shadow" : {
         "kind" : "neutral",

@@ -252,7 +252,14 @@ actor TranscriptionClientLive {
       let text = try await parakeet.transcribe(preparedClip.url)
       transcriptionLogger.info("Parakeet transcription took \(String(format: "%.2f", Date().timeIntervalSince(startTx)))s")
       transcriptionLogger.info("Parakeet request total elapsed \(String(format: "%.2f", Date().timeIntervalSince(startAll)))s")
-      return text
+      var result = text
+      if result.hasSuffix(".") {
+          result.removeLast()
+      }
+      if !result.isEmpty && result.last != " " {
+          result.append(" ")
+      }
+      return result
     }
     let model = await resolveVariant(model)
     // Load or switch to the required model if needed.
