@@ -10,6 +10,11 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 	var settingsWindow: NSWindow?
 	var statusItem: NSStatusItem!
 
+	// App Nap assertion held for the whole run: an always-listening utility must not be
+	// suspended or throttled while idle, or its event-tap watchdog stalls and the first
+	// hotkey after an idle period arrives late (or not at all).
+	var appNapActivityToken: NSObjectProtocol?
+
 	@Dependency(\.soundEffects) var soundEffect
 	@Dependency(\.recording) var recording
 	@Shared(.hexSettings) var hexSettings: HexSettings
@@ -30,6 +35,12 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 
 		// Set activation policy first
 		updateAppMode()
+
+		// Keep the process responsive while idle without keeping the display awake.
+		appNapActivityToken = ProcessInfo.processInfo.beginActivity(
+			options: [.userInitiatedAllowingIdleSystemSleep],
+			reason: "Hex global hotkey monitoring and model warm-up"
+		)
 
 		// Add notification observer
 		NotificationCenter.default.addObserver(
@@ -130,6 +141,10 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 	}
 
 	func applicationWillTerminate(_: Notification) {
+		if let appNapActivityToken {
+			ProcessInfo.processInfo.endActivity(appNapActivityToken)
+			self.appNapActivityToken = nil
+		}
 		Task {
 			await recording.cleanup()
 		}

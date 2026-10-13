@@ -44,6 +44,8 @@ struct AppFeature {
     case task
     case pasteLastTranscript
 
+    case systemWoke
+
     // Permission actions
     case checkPermissions
     case permissionsUpdated(mic: PermissionStatus, acc: PermissionStatus, input: PermissionStatus)
@@ -83,7 +85,8 @@ struct AppFeature {
         return .merge(
           startPasteLastTranscriptMonitoring(),
           ensureSelectedModelReadiness(),
-          startPermissionMonitoring()
+          startPermissionMonitoring(),
+          observeWorkspaceWake()
         )
         
       case .pasteLastTranscript:
@@ -167,6 +170,11 @@ struct AppFeature {
           }
         }
 
+      case .systemWoke:
+        // Display/system wake: weight pages and accelerator state were likely reclaimed while
+        // asleep. Re-check and re-warm in the background so the next hotkey is instant.
+        return ensureSelectedModelReadiness()
+
       case .modelStatusEvaluated:
         return .none
       }
@@ -235,6 +243,28 @@ struct AppFeature {
         }
       }
       await send(.modelStatusEvaluated(isReady))
+
+      // Warm the model now instead of making the first hotkey pay a multi-second cold load
+      // (idle model weights are evictable file-backed memory and macOS reclaims them freely).
+      if isReady {
+        do {
+          try await transcription.prewarm(selectedModel)
+        } catch {
+          HexLog.models.error("Model prewarm failed for \(selectedModel): \(error.localizedDescription)")
+        }
+      }
+    }
+  }
+
+  /// Re-validates and re-warms the model every time the system wakes from sleep.
+  private func observeWorkspaceWake() -> Effect<Action> {
+    .run { send in
+      for await _ in NSWorkspace.shared.notificationCenter
+        .notifications(named: NSWorkspace.didWakeNotification)
+      {
+        HexLog.app.notice("System woke; re-checking model readiness")
+        await send(.systemWoke)
+      }
     }
   }
 

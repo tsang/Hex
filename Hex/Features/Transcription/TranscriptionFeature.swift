@@ -60,6 +60,7 @@ struct TranscriptionFeature {
   enum CancelID {
     case metering
     case transcription
+    case keepWarm
   }
 
   @Dependency(\.transcription) var transcription
@@ -70,6 +71,12 @@ struct TranscriptionFeature {
   @Dependency(\.sleepManagement) var sleepManagement
   @Dependency(\.date.now) var now
   @Dependency(\.transcriptPersistence) var transcriptPersistence
+
+  /// Interval between keep-warm prewarm runs. CoreML weights are clean file-backed memory and
+  /// macOS happily evicts them once the process idles; the next transcription then pays a full
+  /// reload + re-validation (observed ~38 s cold for Parakeet vs ~0.13 s warm). A few-minute
+  /// heartbeat keeps the pipeline resident at a negligible duty cycle.
+  static let keepWarmIntervalNanoseconds: UInt64 = 3 * 60 * 1_000_000_000
 
   var body: some ReducerOf<Self> {
     Reduce { state, action in
@@ -84,7 +91,8 @@ struct TranscriptionFeature {
         return .merge(
           startMeteringEffect(),
           startHotKeyMonitoringEffect(),
-          warmUpRecorderEffect()
+          warmUpRecorderEffect(),
+          keepModelWarmEffect()
         )
 
       // MARK: - Metering
@@ -253,6 +261,31 @@ private extension TranscriptionFeature {
     .run { _ in
       await recording.warmUpRecorder()
     }
+  }
+
+  /// Periodically transcribes a silent clip so the loaded model stays resident and the first
+  /// real hotkey never pays the cold-load cost. Skipped while the model isn't ready; the
+  /// actor serializes it behind any in-flight user transcription.
+  func keepModelWarmEffect() -> Effect<Action> {
+    .run { [transcription] _ in
+      @Shared(.hexSettings) var hexSettings: HexSettings
+      @Shared(.modelBootstrapState) var modelBootstrapState: ModelBootstrapState
+
+      while !Task.isCancelled {
+        try? await Task.sleep(nanoseconds: TranscriptionFeature.keepWarmIntervalNanoseconds)
+        guard !Task.isCancelled else { break }
+        let model = hexSettings.selectedModel
+        guard !model.isEmpty else { continue }
+        let ready = $modelBootstrapState.withLock { $0.isModelReady }
+        guard ready else { continue }
+        do {
+          try await transcription.prewarm(model)
+        } catch {
+          transcriptionFeatureLogger.error("Keep-warm prewarm failed model=\(model): \(error.localizedDescription)")
+        }
+      }
+    }
+    .cancellable(id: CancelID.keepWarm)
   }
 }
 

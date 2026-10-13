@@ -24,6 +24,10 @@ struct TranscriptionClient {
   /// Reports transcription progress via `progressCallback`.
   var transcribe: @Sendable (URL, String, DecodingOptions, @escaping (Progress) -> Void) async throws -> String
 
+  /// Warms the model pipeline without user audio: ensures the model is loaded, then runs
+  /// a tiny silent clip so weights and accelerator state stay resident between recordings.
+  var prewarm: @Sendable (String) async throws -> Void = { _ in }
+
   /// Ensures a model is downloaded (if missing) and loaded into memory, reporting progress via `progressCallback`.
   var downloadModel: @Sendable (String, @escaping (Progress) -> Void) async throws -> Void
 
@@ -42,9 +46,12 @@ struct TranscriptionClient {
 
 extension TranscriptionClient: DependencyKey {
   static var liveValue: Self {
-    let live = TranscriptionClientLive()
+    // One process-wide model holder: the weights are far too large to load twice, and a
+    // per-scope instance would silently reload (and page-evict) per dependency graph.
+    let live = TranscriptionClientLive.shared
     return Self(
       transcribe: { try await live.transcribe(url: $0, model: $1, options: $2, progressCallback: $3) },
+      prewarm: { try await live.prewarm(model: $0) },
       downloadModel: { try await live.downloadAndLoadModel(variant: $0, progressCallback: $1) },
       deleteModel: { try await live.deleteModel(variant: $0) },
       isModelDownloaded: { await live.isModelDownloaded($0) },
@@ -73,6 +80,9 @@ actor TranscriptionClientLive {
   /// The name of the currently loaded model, if any.
   private var currentModelName: String?
   private var parakeet: ParakeetClient = ParakeetClient()
+
+  /// Process-wide instance so heavy model weights are never held by more than one live client.
+  static let shared = TranscriptionClientLive()
 
   /// The base folder under which we store model data (e.g., ~/Library/Application Support/...).
   private lazy var modelsBaseFolder: URL = {
@@ -296,6 +306,25 @@ actor TranscriptionClientLive {
     return text
   }
 
+  /// Runs the full pipeline on a tiny generated silent clip. Ensures the model is loaded
+  /// (download + first load can take a while; repeat runs are sub-second), so callers can
+  /// keep weights and ANE/GPU state resident between user recordings.
+  func prewarm(model: String) async throws {
+    let start = Date()
+    if isParakeet(model) {
+      try await parakeet.ensureLoaded(modelName: model) { _ in }
+      _ = try await parakeet.transcribe(Self.silentClipURL())
+    } else {
+      let variant = await resolveVariant(model)
+      if whisperKit == nil || currentModelName != variant {
+        try await downloadAndLoadModel(variant: variant) { _ in }
+      }
+      guard let whisperKit else { return }
+      _ = try await whisperKit.transcribe(audioPath: Self.silentClipURL().path, decodeOptions: DecodingOptions())
+    }
+    transcriptionLogger.info("Prewarm complete model=\(model) took \(String(format: "%.2f", Date().timeIntervalSince(start)))s")
+  }
+
   // MARK: - Private Helpers
 
   /// Resolve wildcard patterns (e.g. "distil*large-v3") to a concrete model name.
@@ -339,6 +368,48 @@ actor TranscriptionClientLive {
   private func unloadCurrentModel() {
     whisperKit = nil
     currentModelName = nil
+  }
+
+  /// URL of a generated 2-second mono Float32 WAV of silence (16 kHz), written once to the
+  /// temporary directory. Parakeet expects Float32 mono input and FluidAudio's chunk guidance
+  /// wants at least 1.5 s, so the clip clears padding without extra work.
+  private static func silentClipURL() -> URL {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("hex-prewarm-silence.wav")
+    guard !FileManager.default.fileExists(atPath: url.path) else { return url }
+
+    let sampleRate = 16_000
+    let bytesPerFrame = 4 // Float32 mono
+    let frameCount = sampleRate * 2 // 2.0 seconds
+    let dataSize = UInt32(frameCount * bytesPerFrame)
+
+    var wav = Data(capacity: 44 + Int(dataSize))
+    func appendASCII(_ string: String) { wav.append(contentsOf: string.utf8) }
+    func appendUInt32(_ value: UInt32) {
+      var littleEndian = value.littleEndian
+      withUnsafeBytes(of: &littleEndian) { wav.append(contentsOf: $0) }
+    }
+    func appendUInt16(_ value: UInt16) {
+      var littleEndian = value.littleEndian
+      withUnsafeBytes(of: &littleEndian) { wav.append(contentsOf: $0) }
+    }
+
+    appendASCII("RIFF")
+    appendUInt32(36 + dataSize)
+    appendASCII("WAVE")
+    appendASCII("fmt ")
+    appendUInt32(16)
+    appendUInt16(3) // IEEE float
+    appendUInt16(1) // mono
+    appendUInt32(UInt32(sampleRate))
+    appendUInt32(UInt32(sampleRate * bytesPerFrame))
+    appendUInt16(UInt16(bytesPerFrame))
+    appendUInt16(32) // bits per sample
+    appendASCII("data")
+    appendUInt32(dataSize)
+    wav.append(Data(count: Int(dataSize))) // zeros == silence
+
+    try? wav.write(to: url)
+    return url
   }
 
   /// Downloads the model to a temporary folder (if it isn't already on disk),
