@@ -206,32 +206,25 @@ func pauseAllMediaApplications() async -> [String] {
     }
   }
   
-  scriptParts.append("return pausedPlayers")
+  scriptParts.append("set text item delimiters to linefeed\nreturn pausedPlayers as text")
+  
   let script = scriptParts.joined(separator: "\n\n")
   
-  let appleScript = NSAppleScript(source: script)
-  var error: NSDictionary?
-  guard let resultDescriptor = appleScript?.executeAndReturnError(&error) else {
-    if let error = error {
-      mediaLogger.error("Failed to pause media apps: \(error)")
-      mediaControlErrorCount += 1
-      if mediaControlErrorCount >= 3 { mediaControlDisabled = true }
-    }
+  // Run through osascript in its own process: NSAppleScript has segfaulted
+  // inside AppleScript's terminology lexer (TASLexer::UseTerminology) during
+  // compile. Executing out-of-process keeps that OS-component crash off
+  // Hex's critical path; failure here just means nothing was paused.
+  guard let output = await runOSAScript(script) else {
+    mediaControlErrorCount += 1
+    if mediaControlErrorCount >= 3 { mediaControlDisabled = true }
     return []
   }
   
-  // Convert AppleScript list to Swift array
-  var pausedPlayers: [String] = []
-  let count = resultDescriptor.numberOfItems
+  let pausedPlayers = output
+    .split(whereSeparator: \.isNewline)
+    .map(String.init)
+    .filter { !$0.isEmpty }
   
-  if count > 0 {
-    for i in 1...count {
-      if let item = resultDescriptor.atIndex(i)?.stringValue {
-        pausedPlayers.append(item)
-      }
-    }
-  }
-    
   mediaLogger.notice("Paused media players: \(pausedPlayers.joined(separator: ", "))")
   
   return pausedPlayers
@@ -271,13 +264,43 @@ func resumeMediaApplications(_ players: [String]) async {
   
   let script = scriptParts.joined(separator: "\n\n")
   
-  let appleScript = NSAppleScript(source: script)
-  var error: NSDictionary?
-  appleScript?.executeAndReturnError(&error)
-  if let error = error {
-    mediaLogger.error("Failed to resume media apps: \(error)")
+  if await runOSAScript(script) == nil {
+    mediaLogger.error("Failed to resume media apps")
   }
 }
+
+  /// Runs an AppleScript snippet via /usr/bin/osascript in a detached child
+  /// process. NSAppleScript's in-process compile has segfaulted inside the
+  /// AppleScript component (TASLexer); running the interpreter out-of-process
+  /// means such a crash only takes the helper. Returns stdout on success, nil
+  /// on failure (logged).
+  private func runOSAScript(_ source: String) async -> String? {
+    await Task.detached(priority: .userInitiated) {
+      let process = Process()
+      process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+      process.arguments = ["-e", source]
+      let stdout = Pipe()
+      let stderr = Pipe()
+      process.standardOutput = stdout
+      process.standardError = stderr
+      do {
+        try process.run()
+      } catch {
+        mediaLogger.error("Failed to launch osascript: \(error)")
+        return nil
+      }
+      let outData = stdout.fileHandleForReading.readDataToEndOfFile()
+      let errData = stderr.fileHandleForReading.readDataToEndOfFile()
+      process.waitUntilExit()
+      if process.terminationStatus != 0 {
+        let msg = String(data: errData, encoding: .utf8)?
+          .trimmingCharacters(in: .whitespacesAndNewlines) ?? "exit \(process.terminationStatus)"
+        mediaLogger.error("osascript failed: \(msg)")
+        return nil
+      }
+      return String(data: outData, encoding: .utf8)
+    }.value
+  }
 
 /// Simulates a media key press (the Play/Pause key) by posting a system-defined NSEvent.
 /// This toggles the state of the active media app.

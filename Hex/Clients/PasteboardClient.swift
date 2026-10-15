@@ -236,6 +236,10 @@ struct PasteboardClientLive {
     /// payload and degrades such events to their bare keycode (a lone "a"). Characters
     /// not on the US ANSI layout fall back to Unicode packets (best-effort).
     private static func postKeyCodes(_ text: String) {
+        if isScreenSharingFrontmost() {
+            postKeyCodesMirrored(text)
+            return
+        }
         let source = CGEventSource(stateID: .combinedSessionState)
         releaseStuckModifiers(source)
         var pendingUnicode = ""
@@ -248,12 +252,16 @@ struct PasteboardClientLive {
                 let needsShift = flags.contains(.maskShift)
                 if needsShift {
                     postModifierDown(56, source: source)
+                    usleep(20_000)
                 }
                 postKey(code, flags: flags, source: source)
                 if needsShift {
+                    usleep(20_000)
                     postModifierUp(56, source: source)
+                    usleep(5_000)
+                } else {
+                    usleep(4_000)
                 }
-                usleep(1_000)
             } else {
                 pendingUnicode.unicodeScalars.append(scalar)
             }
@@ -261,6 +269,67 @@ struct PasteboardClientLive {
         if !pendingUnicode.isEmpty {
             postUnicodeStatic(pendingUnicode)
         }
+    }
+
+    /// Screen Sharing relay variant: the relay drops shift held across a
+    /// character (posted transitions coalesce and per-event flags appear to be
+    /// ignored), but latching state does cross — the Option latch we had to
+    /// clean earlier proves it. So capitals are driven through the Caps Lock
+    /// key: toggle on, type the letter unshifted, toggle off as needed, and
+    /// restore the user's original caps state at the end. Shift-only symbols
+    /// (??? !!!) keep a long 50 ms physical-style shift hold.
+    private static func postKeyCodesMirrored(_ text: String) {
+        let source = CGEventSource(stateID: .combinedSessionState)
+        releaseStuckModifiers(source)
+        let capsWasOn = CGEventSource.keyState(.hidSystemState, key: 57)
+        var capsOn = capsWasOn
+        var pendingUnicode = ""
+
+        func setCaps(_ on: Bool) {
+            guard capsOn != on else { return }
+            pressCapsLock(source)
+            capsOn = on
+            usleep(50_000)
+        }
+
+        for scalar in text.unicodeScalars {
+            guard let (code, flags) = usKey(for: scalar) else {
+                pendingUnicode.unicodeScalars.append(scalar)
+                continue
+            }
+            if !pendingUnicode.isEmpty {
+                postUnicodeStatic(pendingUnicode)
+                pendingUnicode = ""
+            }
+            let isLetter = (scalar >= "a" && scalar <= "z") || (scalar >= "A" && scalar <= "Z")
+            let needsShift = flags.contains(.maskShift)
+            if isLetter {
+                setCaps(needsShift)
+                postKey(code, flags: [], source: source)
+            } else if needsShift {
+                postModifierDown(56, source: source)
+                usleep(50_000)
+                postKey(code, flags: [.maskShift], source: source)
+                usleep(50_000)
+                postModifierUp(56, source: source)
+                usleep(10_000)
+            } else {
+                postKey(code, flags: [], source: source)
+            }
+            usleep(6_000)
+        }
+        if !pendingUnicode.isEmpty {
+            postUnicodeStatic(pendingUnicode)
+        }
+        setCaps(capsWasOn)
+    }
+
+    private static func pressCapsLock(_ source: CGEventSource?) {
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: 57, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: 57, keyDown: false) else { return }
+        down.post(tap: .cghidEventTap)
+        usleep(20_000)
+        up.post(tap: .cghidEventTap)
     }
 
     /// Over Apple Screen Sharing the relayed Option from the hotkey press can
