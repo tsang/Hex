@@ -21,6 +21,10 @@ extension SharedReaderKey
     Self[.inMemory("isSettingPasteLastTranscriptHotkey"), default: false]
   }
 
+  static var isSettingPasteNoClipboardHotkey: Self {
+    Self[.inMemory("isSettingPasteNoClipboardHotkey"), default: false]
+  }
+
   static var isRemappingScratchpadFocused: Self {
     Self[.inMemory("isRemappingScratchpadFocused"), default: false]
   }
@@ -35,6 +39,7 @@ struct SettingsFeature {
     @Shared(.hexSettings) var hexSettings: HexSettings
     @Shared(.isSettingHotKey) var isSettingHotKey: Bool = false
     @Shared(.isSettingPasteLastTranscriptHotkey) var isSettingPasteLastTranscriptHotkey: Bool = false
+    @Shared(.isSettingPasteNoClipboardHotkey) var isSettingPasteNoClipboardHotkey: Bool = false
     @Shared(.isRemappingScratchpadFocused) var isRemappingScratchpadFocused: Bool = false
     @Shared(.transcriptionHistory) var transcriptionHistory: TranscriptionHistory
     @Shared(.hotkeyPermissionState) var hotkeyPermissionState: HotkeyPermissionState
@@ -42,6 +47,7 @@ struct SettingsFeature {
     var languages: IdentifiedArrayOf<Language> = []
     var currentModifiers: Modifiers = .init(modifiers: [])
     var currentPasteLastModifiers: Modifiers = .init(modifiers: [])
+    var currentPasteNoClipboardModifiers: Modifiers = .init(modifiers: [])
     var remappingScratchpadText: String = ""
     
     // Available microphones
@@ -61,7 +67,9 @@ struct SettingsFeature {
     case task
     case startSettingHotKey
     case startSettingPasteLastTranscriptHotkey
+    case startSettingPasteNoClipboardHotkey
     case clearPasteLastTranscriptHotkey
+    case clearPasteNoClipboardHotkey
     case keyEvent(KeyEvent)
     case toggleOpenOnLogin(Bool)
     case togglePreventSystemSleep(Bool)
@@ -227,7 +235,38 @@ struct SettingsFeature {
         state.$hexSettings.withLock { $0.pasteLastTranscriptHotkey = nil }
         return .none
 
+      case .startSettingPasteNoClipboardHotkey:
+        state.$isSettingPasteNoClipboardHotkey.withLock { $0 = true }
+        state.currentPasteNoClipboardModifiers = .init(modifiers: [])
+        return .none
+
+      case .clearPasteNoClipboardHotkey:
+        state.$hexSettings.withLock { $0.pasteLastTranscriptNoClipboardHotkey = nil }
+        return .none
+
       case let .keyEvent(keyEvent):
+        // Handle no-clipboard paste hotkey setting
+        if state.isSettingPasteNoClipboardHotkey {
+          if keyEvent.key == .escape {
+            state.$isSettingPasteNoClipboardHotkey.withLock { $0 = false }
+            state.currentPasteNoClipboardModifiers = []
+            return .none
+          }
+
+          state.currentPasteNoClipboardModifiers = keyEvent.modifiers.union(state.currentPasteNoClipboardModifiers)
+          let currentModifiers = state.currentPasteNoClipboardModifiers
+          if let key = keyEvent.key {
+            guard !currentModifiers.isEmpty else {
+              return .none
+            }
+            state.$hexSettings.withLock {
+              $0.pasteLastTranscriptNoClipboardHotkey = HotKey(key: key, modifiers: currentModifiers.erasingSides())
+            }
+            state.$isSettingPasteNoClipboardHotkey.withLock { $0 = false }
+            state.currentPasteNoClipboardModifiers = []
+          }
+          return .none
+        }
         // Handle paste last transcript hotkey setting
         if state.isSettingPasteLastTranscriptHotkey {
           if keyEvent.key == .escape {

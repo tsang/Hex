@@ -20,6 +20,7 @@ struct PasteboardClient {
     var paste: @Sendable (String) async -> Void
     var copy: @Sendable (String) async -> Void
     var sendKeyboardCommand: @Sendable (KeyboardCommand) async -> Void
+    var insertTextDirectly: @Sendable (String) async -> Void
 }
 
 extension PasteboardClient: DependencyKey {
@@ -34,6 +35,9 @@ extension PasteboardClient: DependencyKey {
             },
             sendKeyboardCommand: { command in
                 await live.sendKeyboardCommand(command)
+            },
+            insertTextDirectly: { text in
+                await live.insertTextDirectly(text)
             }
         )
     }
@@ -85,7 +89,7 @@ struct PasteboardClientLive {
         if hexSettings.useClipboardPaste {
             await pasteWithClipboard(text)
         } else {
-            simulateTypingWithAppleScript(text)
+            await typeText(text)
         }
     }
     
@@ -150,6 +154,51 @@ struct PasteboardClientLive {
         }
         
         pasteboardLogger.debug("Sent keyboard command: \(command.displayName)")
+    }
+    /// Inserts text at the focused element without touching the pasteboard,
+    /// using the configured `textInsertionEngine`.
+    @MainActor
+    func insertTextDirectly(_ text: String) async {
+        await typeText(text)
+    }
+
+    @MainActor
+    private func typeText(_ text: String) async {
+        switch hexSettings.textInsertionEngine {
+        case .appleScript:
+            simulateTypingWithAppleScript(text)
+        case .native:
+            if (try? Self.insertTextAtCursor(text)) != nil {
+                pasteboardLogger.debug("Inserted text via accessibility (\(text.count) chars).")
+                return
+            }
+            await postUnicodeText(text)
+        }
+    }
+
+    /// Posts Unicode text as CGEvent keyboard packets (max 20 UTF-16 units per event)
+    /// to the HID stream. Fallback for apps that don't expose AX text editing.
+    @MainActor
+    private func postUnicodeText(_ text: String) async {
+        let source = CGEventSource(stateID: .combinedSessionState)
+        var utf16 = Array(text.utf16)
+        var index = 0
+        while index < utf16.count {
+            let end = min(index + 20, utf16.count)
+            let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
+            let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+            utf16.withUnsafeBufferPointer { buffer in
+                guard let base = buffer.baseAddress else { return }
+                let chunk = base.advanced(by: index)
+                let count = end - index
+                down?.keyboardSetUnicodeString(stringLength: count, unicodeString: chunk)
+                up?.keyboardSetUnicodeString(stringLength: count, unicodeString: chunk)
+            }
+            down?.post(tap: .cghidEventTap)
+            up?.post(tap: .cghidEventTap)
+            index = end
+        }
+        pasteboardLogger.debug("Posted \(utf16.count) UTF-16 units via CGEvent Unicode injection.")
     }
 
     /// Pastes current clipboard content to the frontmost application

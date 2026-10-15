@@ -5,10 +5,26 @@ public enum RecordingAudioBehavior: String, Codable, CaseIterable, Equatable, Se
 	case mute
 	case doNothing
 }
+/// Engine used when inserting text without the clipboard.
+public enum TextInsertionEngine: String, Codable, CaseIterable, Equatable, Sendable {
+	/// Accessibility insertion when the focused element supports it, CGEvent
+	/// Unicode keystrokes as fallback. Fast and special-character safe.
+	case native
+	/// Legacy `System Events keystroke` typing. Slower on long text.
+	case appleScript
+
+	public var displayName: String {
+		switch self {
+		case .native: return "Native (AX + key events)"
+		case .appleScript: return "AppleScript keystroke"
+		}
+	}
+}
 
 /// User-configurable settings saved to disk.
 public struct HexSettings: Codable, Equatable, Sendable {
 	public static let defaultPasteLastTranscriptHotkey = HotKey(key: .v, modifiers: [.option, .shift])
+	public static let defaultPasteLastTranscriptNoClipboardHotkey = HotKey(key: .v, modifiers: [Modifier(kind: .option, side: .right)])
 	public static let baseSoundEffectsVolume: Double = HexCoreConstants.baseSoundEffectsVolume
 	public static let defaultWordRemovals: [WordRemoval] = [
 		.init(pattern: "uh+"),
@@ -30,6 +46,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 	public var showDockIcon: Bool
 	public var selectedModel: String
 	public var useClipboardPaste: Bool
+	public var textInsertionEngine: TextInsertionEngine
 	public var preventSystemSleep: Bool
 	public var recordingAudioBehavior: RecordingAudioBehavior
 	public var minimumKeyTime: Double
@@ -40,6 +57,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 	public var saveTranscriptionHistory: Bool
 	public var maxHistoryEntries: Int?
 	public var pasteLastTranscriptHotkey: HotKey?
+	public var pasteLastTranscriptNoClipboardHotkey: HotKey?
 	public var hasCompletedModelBootstrap: Bool
 	public var hasCompletedStorageMigration: Bool
 	public var wordRemovalsEnabled: Bool
@@ -54,6 +72,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		showDockIcon: Bool = true,
 		selectedModel: String = ParakeetModel.multilingualV3.identifier,
 		useClipboardPaste: Bool = true,
+		textInsertionEngine: TextInsertionEngine = .native,
 		preventSystemSleep: Bool = true,
 		recordingAudioBehavior: RecordingAudioBehavior = .doNothing,
 		minimumKeyTime: Double = HexCoreConstants.defaultMinimumKeyTime,
@@ -64,6 +83,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		saveTranscriptionHistory: Bool = true,
 		maxHistoryEntries: Int? = nil,
 		pasteLastTranscriptHotkey: HotKey? = HexSettings.defaultPasteLastTranscriptHotkey,
+		pasteLastTranscriptNoClipboardHotkey: HotKey? = HexSettings.defaultPasteLastTranscriptNoClipboardHotkey,
 		hasCompletedModelBootstrap: Bool = false,
 		hasCompletedStorageMigration: Bool = false,
 		wordRemovalsEnabled: Bool = false,
@@ -77,6 +97,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		self.showDockIcon = showDockIcon
 		self.selectedModel = selectedModel
 		self.useClipboardPaste = useClipboardPaste
+		self.textInsertionEngine = textInsertionEngine
 		self.preventSystemSleep = preventSystemSleep
 		self.recordingAudioBehavior = recordingAudioBehavior
 		self.minimumKeyTime = minimumKeyTime
@@ -87,6 +108,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		self.saveTranscriptionHistory = saveTranscriptionHistory
 		self.maxHistoryEntries = maxHistoryEntries
 		self.pasteLastTranscriptHotkey = pasteLastTranscriptHotkey
+		self.pasteLastTranscriptNoClipboardHotkey = pasteLastTranscriptNoClipboardHotkey
 		self.hasCompletedModelBootstrap = hasCompletedModelBootstrap
 		self.hasCompletedStorageMigration = hasCompletedStorageMigration
 		self.wordRemovalsEnabled = wordRemovalsEnabled
@@ -120,6 +142,7 @@ private enum HexSettingKey: String, CodingKey, CaseIterable {
 	case showDockIcon
 	case selectedModel
 	case useClipboardPaste
+	case textInsertionEngine
 	case preventSystemSleep
 	case recordingAudioBehavior
 	case pauseMediaOnRecord // Legacy
@@ -131,6 +154,7 @@ private enum HexSettingKey: String, CodingKey, CaseIterable {
 	case saveTranscriptionHistory
 	case maxHistoryEntries
 	case pasteLastTranscriptHotkey
+	case pasteLastTranscriptNoClipboardHotkey
 	case hasCompletedModelBootstrap
 	case hasCompletedStorageMigration
 	case wordRemovalsEnabled
@@ -203,6 +227,7 @@ private enum HexSettingsSchema {
 		SettingsField(.showDockIcon, keyPath: \.showDockIcon, default: defaults.showDockIcon).eraseToAny(),
 		SettingsField(.selectedModel, keyPath: \.selectedModel, default: defaults.selectedModel).eraseToAny(),
 		SettingsField(.useClipboardPaste, keyPath: \.useClipboardPaste, default: defaults.useClipboardPaste).eraseToAny(),
+		SettingsField(.textInsertionEngine, keyPath: \.textInsertionEngine, default: defaults.textInsertionEngine).eraseToAny(),
 		SettingsField(.preventSystemSleep, keyPath: \.preventSystemSleep, default: defaults.preventSystemSleep).eraseToAny(),
 		SettingsField(
 			.recordingAudioBehavior,
@@ -250,6 +275,14 @@ private enum HexSettingsSchema {
 			.pasteLastTranscriptHotkey,
 			keyPath: \.pasteLastTranscriptHotkey,
 			default: defaults.pasteLastTranscriptHotkey,
+			encode: { container, key, value in
+				try container.encodeIfPresent(value, forKey: key)
+			}
+		).eraseToAny(),
+		SettingsField(
+			.pasteLastTranscriptNoClipboardHotkey,
+			keyPath: \.pasteLastTranscriptNoClipboardHotkey,
+			default: defaults.pasteLastTranscriptNoClipboardHotkey,
 			encode: { container, key, value in
 				try container.encodeIfPresent(value, forKey: key)
 			}

@@ -43,6 +43,7 @@ struct AppFeature {
     case setActiveTab(ActiveTab)
     case task
     case pasteLastTranscript
+    case pasteLastTranscriptNoClipboard
 
     case systemWoke
 
@@ -60,6 +61,7 @@ struct AppFeature {
   @Dependency(\.pasteboard) var pasteboard
   @Dependency(\.transcription) var transcription
   @Dependency(\.permissions) var permissions
+  @Dependency(\.soundEffects) var soundEffects
 
   var body: some ReducerOf<Self> {
     BindingReducer()
@@ -96,6 +98,19 @@ struct AppFeature {
         }
         return .run { _ in
           await pasteboard.paste(lastTranscript)
+        }
+        
+      case .pasteLastTranscriptNoClipboard:
+        @Shared(.transcriptionHistory) var transcriptionHistory: TranscriptionHistory
+        guard let lastTranscript = transcriptionHistory.history.first?.text,
+              !lastTranscript.isEmpty else {
+          HexLog.app.debug("no-clipboard paste: history empty")
+          return .none
+        }
+        HexLog.app.debug("no-clipboard paste: inserting \(lastTranscript.count) chars")
+        return .run { _ in
+          await pasteboard.insertTextDirectly(lastTranscript)
+          soundEffects.play(.pasteTranscript)
         }
         
       case .transcription(.modelMissing):
@@ -184,17 +199,34 @@ struct AppFeature {
   private func startPasteLastTranscriptMonitoring() -> Effect<Action> {
     .run { send in
       @Shared(.isSettingPasteLastTranscriptHotkey) var isSettingPasteLastTranscriptHotkey: Bool
+      @Shared(.isSettingPasteNoClipboardHotkey) var isSettingPasteNoClipboardHotkey: Bool
       @Shared(.hexSettings) var hexSettings: HexSettings
 
+      HexLog.app.debug("paste-monitoring effect running")
       let token = keyEventMonitor.handleKeyEvent { keyEvent in
-        // Skip if user is setting a hotkey
-        if isSettingPasteLastTranscriptHotkey {
+        // Skip while the user is recording either paste hotkey
+        if isSettingPasteLastTranscriptHotkey || isSettingPasteNoClipboardHotkey {
           return false
+        }
+
+        guard let key = keyEvent.key else { return false }
+        if key == .v {
+          HexLog.keyEvent.debug("paste-monitor saw key=v mods=\(keyEvent.modifiers.kinds.map { $0.rawValue }) recording=\(isSettingPasteLastTranscriptHotkey || isSettingPasteNoClipboardHotkey)")
+        }
+        if let directHotkey = hexSettings.pasteLastTranscriptNoClipboardHotkey,
+           key == directHotkey.key,
+           keyEvent.modifiers.matchesExactly(directHotkey.modifiers) {
+          HexLog.app.debug("no-clipboard paste hotkey matched")
+          MainActor.assumeIsolated {
+            send(.pasteLastTranscriptNoClipboard)
+          }
+          // Consume only the letter: the still-held modifier must pass through so
+          // the recorder's modifier state machine doesn't see a bogus press-and-hold.
+          return true
         }
 
         // Check if this matches the paste last transcript hotkey
         guard let pasteHotkey = hexSettings.pasteLastTranscriptHotkey,
-              let key = keyEvent.key,
               key == pasteHotkey.key,
               keyEvent.modifiers.matchesExactly(pasteHotkey.modifiers) else {
           return false

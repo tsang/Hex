@@ -19,6 +19,9 @@ struct HexApp: App {
             // Copy last transcript to clipboard
             MenuBarCopyLastTranscriptButton()
 
+            // Types last transcript at cursor without touching the clipboard
+            MenuBarPasteNoClipboardButton()
+
             // Liveness: shows last successful model warm; click forces tap rebuild + rewarm.
             MenuBarReconnectHotkeyButton()
 

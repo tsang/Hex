@@ -33,6 +33,24 @@ struct GeneralSectionView: View {
 			}
 
 			Label {
+				HStack {
+					Text("Typing engine")
+					Spacer()
+					Picker("", selection: $store.hexSettings.textInsertionEngine) {
+						ForEach(TextInsertionEngine.allCases, id: \.self) { engine in
+							Text(engine.displayName).tag(engine)
+						}
+					}
+					.pickerStyle(.menu)
+					.frame(width: 210)
+				}
+				Text("Used whenever text is typed instead of pasted (clipboard off, or the no-clipboard paste hotkey). Native inserts via Accessibility with a key-event fallback.")
+					.settingsCaption()
+			} icon: {
+				Image(systemName: "keyboard")
+			}
+
+			Label {
 				Toggle("Copy to clipboard", isOn: $store.hexSettings.copyToClipboard)
 				Text("Copy transcription text to clipboard in addition to pasting it")
 			} icon: {

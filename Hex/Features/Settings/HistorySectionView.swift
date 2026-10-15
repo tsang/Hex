@@ -52,6 +52,8 @@ struct HistorySectionView: View {
 				}
 
 				PasteLastTranscriptHotkeyRow(store: store)
+
+				PasteLastTranscriptNoClipboardHotkeyRow(store: store)
 			}
 		} header: {
 			Text("History")
@@ -113,6 +115,63 @@ private struct PasteLastTranscriptHotkeyRow: View {
 					store.send(.clearPasteLastTranscriptHotkey)
 				} label: {
 					Label("Clear shortcut", systemImage: "xmark.circle")
+				}
+				.buttonStyle(.borderless)
+				.font(.caption)
+				.foregroundStyle(.secondary)
+			}
+		}
+		.enableInjection()
+	}
+}
+
+private struct PasteLastTranscriptNoClipboardHotkeyRow: View {
+	@ObserveInjection var inject
+	@Bindable var store: StoreOf<SettingsFeature>
+
+	var body: some View {
+		let pasteHotkey = store.hexSettings.pasteLastTranscriptNoClipboardHotkey
+
+		VStack(alignment: .leading, spacing: 12) {
+			Label {
+				VStack(alignment: .leading, spacing: 2) {
+					Text("Paste Last Transcript (No Clipboard)")
+						.font(.subheadline.weight(.semibold))
+					Text("Types your last transcription at the cursor without touching the clipboard. Uses the typing engine from General settings.")
+						.settingsCaption()
+				}
+			} icon: {
+				Image(systemName: "keyboard")
+			}
+
+			let key = store.isSettingPasteNoClipboardHotkey ? nil : pasteHotkey?.key
+			let modifiers = store.isSettingPasteNoClipboardHotkey ? store.currentPasteNoClipboardModifiers : (pasteHotkey?.modifiers ?? .init(modifiers: []))
+
+			HStack {
+				Spacer()
+				ZStack {
+					HotKeyView(modifiers: modifiers, key: key, isActive: store.isSettingPasteNoClipboardHotkey)
+
+					if !store.isSettingPasteNoClipboardHotkey, pasteHotkey == nil {
+						Text("Not set")
+							.settingsCaption()
+					}
+				}
+				.contentShape(Rectangle())
+				.onTapGesture {
+					store.send(.startSettingPasteNoClipboardHotkey)
+				}
+				Spacer()
+			}
+
+			if store.isSettingPasteNoClipboardHotkey {
+				Text("Use at least one modifier (⌘, ⌥, ⇧, ⌃) plus a key.")
+					.settingsCaption()
+			} else if pasteHotkey != nil {
+				Button {
+					store.send(.clearPasteNoClipboardHotkey)
+				} label: {
+					Text("Clear shortcut")
 				}
 				.buttonStyle(.borderless)
 				.font(.caption)
