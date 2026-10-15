@@ -215,6 +215,7 @@ struct PasteboardClientLive {
     /// not on the US ANSI layout fall back to Unicode packets (best-effort).
     private static func postKeyCodes(_ text: String) {
         let source = CGEventSource(stateID: .combinedSessionState)
+        releaseStuckModifiers(source)
         var pendingUnicode = ""
         for scalar in text.unicodeScalars {
             if let (code, flags) = usKey(for: scalar) {
@@ -222,7 +223,14 @@ struct PasteboardClientLive {
                     postUnicodeStatic(pendingUnicode)
                     pendingUnicode = ""
                 }
+                let needsShift = flags.contains(.maskShift)
+                if needsShift {
+                    postModifierDown(56, source: source)
+                }
                 postKey(code, flags: flags, source: source)
+                if needsShift {
+                    postModifierUp(56, source: source)
+                }
                 usleep(1_000)
             } else {
                 pendingUnicode.unicodeScalars.append(scalar)
@@ -233,9 +241,49 @@ struct PasteboardClientLive {
         }
     }
 
+    /// Over Apple Screen Sharing the relayed Option from the hotkey press can
+    /// stay latched while injection begins, mapping every character through the
+    /// Option alternates ("Test" arrives as "†´ß†"). Explicitly release held
+    /// modifiers first so keystrokes are clean.
+    private static func releaseStuckModifiers(_ source: CGEventSource?) {
+        let held = CGEventSource.flagsState(.combinedSessionState)
+        var remaining = held
+        var released = false
+        for (mask, code) in [(CGEventFlags.maskShift, CGKeyCode(56)),
+                              (.maskControl, 59),
+                              (.maskAlternate, 58),
+                              (.maskCommand, 55)] where held.contains(mask) {
+            guard let ev = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false) else { continue }
+            remaining.remove(mask)
+            ev.flags = remaining
+            ev.post(tap: .cghidEventTap)
+            usleep(500)
+            released = true
+        }
+        if released {
+            usleep(4_000)
+        }
+    }
+
+    /// Shift is the only modifier typed mid-text; held across the character like
+    /// hardware so relayed sessions translate it faithfully.
+    private static func postModifierDown(_ code: CGKeyCode, source: CGEventSource?) {
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true) else { return }
+        down.flags = [.maskShift]
+        down.post(tap: .cghidEventTap)
+        usleep(500)
+    }
+
+    private static func postModifierUp(_ code: CGKeyCode, source: CGEventSource?) {
+        guard let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false) else { return }
+        up.flags = []
+        up.post(tap: .cghidEventTap)
+        usleep(500)
+    }
+
     private static func postKey(_ code: CGKeyCode, flags: CGEventFlags, source: CGEventSource?) {
         guard let down = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true),
-              let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false) else { return }
+          let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false) else { return }
         down.flags = flags
         up.flags = flags
         down.post(tap: .cghidEventTap)
