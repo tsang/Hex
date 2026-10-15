@@ -87,7 +87,10 @@ struct PasteboardClientLive {
 
     @MainActor
     func paste(text: String) async {
-        if hexSettings.useClipboardPaste {
+        // When mirroring through the Screen Sharing client, always type:
+        // clipboard sync across the relay can lag or miss entirely, while
+        // plain keystrokes traverse it cleanly.
+        if hexSettings.useClipboardPaste && !Self.isScreenSharingFrontmost() {
             await pasteWithClipboard(text)
         } else {
             await typeText(text)
@@ -165,19 +168,38 @@ struct PasteboardClientLive {
 
     @MainActor
     private func typeText(_ text: String) async {
+        if resolvedEngine() == .keyCodes {
+            Self.postKeyCodes(text)
+            pasteboardLogger.debug("Typed \(text.count) chars as plain key codes.")
+            return
+        }
         switch hexSettings.textInsertionEngine {
         case .appleScript:
             simulateTypingWithAppleScript(text)
-        case .keyCodes:
-            Self.postKeyCodes(text)
-            pasteboardLogger.debug("Typed \(text.count) chars as plain key codes.")
-        case .native:
+        default:
             if (try? Self.insertTextAtCursor(text)) != nil {
                 pasteboardLogger.debug("Inserted text via accessibility (\(text.count) chars).")
                 return
             }
             await postUnicodeText(text)
         }
+    }
+
+    /// Resolves `.auto`: when the Screen Sharing client (com.apple.ScreenSharing)
+    /// is frontmost, keystrokes are relayed to the remote Mac — Unicode-payload
+    /// events lose their payload there and AX inserts land on the client window
+    /// itself, so plain key codes are the only reliable insert.
+    private func resolvedEngine() -> TextInsertionEngine {
+        switch hexSettings.textInsertionEngine {
+        case .auto:
+            return Self.isScreenSharingFrontmost() ? .keyCodes : .native
+        case let other:
+            return other
+        }
+    }
+
+    private static func isScreenSharingFrontmost() -> Bool {
+        NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.ScreenSharing"
     }
 
     /// Posts Unicode text as CGEvent keyboard packets (max 20 UTF-16 units per event)

@@ -7,6 +7,9 @@ public enum RecordingAudioBehavior: String, Codable, CaseIterable, Equatable, Se
 }
 /// Engine used when inserting text without the clipboard.
 public enum TextInsertionEngine: String, Codable, CaseIterable, Equatable, Sendable {
+	/// Prefers native Accessibility + key events, but automatically uses plain
+	/// key codes while a Screen Sharing client is in the foreground.
+	case auto
 	/// Accessibility insertion when the focused element supports it, CGEvent
 	/// Unicode keystrokes as fallback. Fast and special-character safe.
 	case native
@@ -19,6 +22,7 @@ public enum TextInsertionEngine: String, Codable, CaseIterable, Equatable, Senda
 
 	public var displayName: String {
 		switch self {
+		case .auto: return "Auto (Screen Sharing aware)"
 		case .native: return "Native (AX + key events)"
 		case .keyCodes: return "Plain keystrokes (Screen Sharing)"
 		case .appleScript: return "AppleScript keystroke"
@@ -77,7 +81,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		showDockIcon: Bool = true,
 		selectedModel: String = ParakeetModel.multilingualV3.identifier,
 		useClipboardPaste: Bool = true,
-		textInsertionEngine: TextInsertionEngine = .native,
+		textInsertionEngine: TextInsertionEngine = .auto,
 		preventSystemSleep: Bool = true,
 		recordingAudioBehavior: RecordingAudioBehavior = .doNothing,
 		minimumKeyTime: Double = HexCoreConstants.defaultMinimumKeyTime,
