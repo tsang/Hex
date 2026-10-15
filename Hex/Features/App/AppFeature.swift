@@ -213,9 +213,12 @@ struct AppFeature {
         if key == .v {
           HexLog.keyEvent.debug("paste-monitor saw key=v mods=\(keyEvent.modifiers.kinds.map { $0.rawValue }) recording=\(isSettingPasteLastTranscriptHotkey || isSettingPasteNoClipboardHotkey)")
         }
+        // Side-insensitive kind matching: Apple Screen Sharing relays input
+        // without left/right modifier side info, so side-strict matching would
+        // miss remote keystrokes and leak the letter into the focused app.
         if let directHotkey = hexSettings.pasteLastTranscriptNoClipboardHotkey,
            key == directHotkey.key,
-           keyEvent.modifiers.matchesExactly(directHotkey.modifiers) {
+           keyEvent.modifiers.kinds == directHotkey.modifiers.kinds {
           HexLog.app.debug("no-clipboard paste hotkey matched")
           MainActor.assumeIsolated {
             send(.pasteLastTranscriptNoClipboard)
@@ -225,10 +228,10 @@ struct AppFeature {
           return true
         }
 
-        // Check if this matches the paste last transcript hotkey
+        // Check if this matches the paste last transcript hotkey (side-insensitive)
         guard let pasteHotkey = hexSettings.pasteLastTranscriptHotkey,
               key == pasteHotkey.key,
-              keyEvent.modifiers.matchesExactly(pasteHotkey.modifiers) else {
+              keyEvent.modifiers.kinds == pasteHotkey.modifiers.kinds else {
           return false
         }
 

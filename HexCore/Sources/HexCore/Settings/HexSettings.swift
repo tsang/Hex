@@ -10,12 +10,17 @@ public enum TextInsertionEngine: String, Codable, CaseIterable, Equatable, Senda
 	/// Accessibility insertion when the focused element supports it, CGEvent
 	/// Unicode keystrokes as fallback. Fast and special-character safe.
 	case native
+	/// Plain hardware-like keystrokes (keycode + modifiers, no Unicode payload).
+	/// Survives the Apple Screen Sharing input relay; may pass through the target
+	/// app's autocorrect since it behaves like real typing.
+	case keyCodes
 	/// Legacy `System Events keystroke` typing. Slower on long text.
 	case appleScript
 
 	public var displayName: String {
 		switch self {
 		case .native: return "Native (AX + key events)"
+		case .keyCodes: return "Plain keystrokes (Screen Sharing)"
 		case .appleScript: return "AppleScript keystroke"
 		}
 	}

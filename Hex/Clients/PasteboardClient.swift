@@ -5,6 +5,7 @@
 //  Created by Kit Langton on 1/24/25.
 //
 
+import Carbon.HIToolbox
 import ComposableArchitecture
 import Dependencies
 import DependenciesMacros
@@ -167,6 +168,9 @@ struct PasteboardClientLive {
         switch hexSettings.textInsertionEngine {
         case .appleScript:
             simulateTypingWithAppleScript(text)
+        case .keyCodes:
+            Self.postKeyCodes(text)
+            pasteboardLogger.debug("Typed \(text.count) chars as plain key codes.")
         case .native:
             if (try? Self.insertTextAtCursor(text)) != nil {
                 pasteboardLogger.debug("Inserted text via accessibility (\(text.count) chars).")
@@ -180,6 +184,10 @@ struct PasteboardClientLive {
     /// to the HID stream. Fallback for apps that don't expose AX text editing.
     @MainActor
     private func postUnicodeText(_ text: String) async {
+        Self.postUnicodeStatic(text)
+    }
+
+    private static func postUnicodeStatic(_ text: String) {
         let source = CGEventSource(stateID: .combinedSessionState)
         var utf16 = Array(text.utf16)
         var index = 0
@@ -189,16 +197,136 @@ struct PasteboardClientLive {
             let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
             utf16.withUnsafeBufferPointer { buffer in
                 guard let base = buffer.baseAddress else { return }
-                let chunk = base.advanced(by: index)
                 let count = end - index
-                down?.keyboardSetUnicodeString(stringLength: count, unicodeString: chunk)
-                up?.keyboardSetUnicodeString(stringLength: count, unicodeString: chunk)
+                down?.keyboardSetUnicodeString(stringLength: count, unicodeString: base.advanced(by: index))
+                up?.keyboardSetUnicodeString(stringLength: count, unicodeString: base.advanced(by: index))
             }
             down?.post(tap: .cghidEventTap)
             up?.post(tap: .cghidEventTap)
             index = end
         }
         pasteboardLogger.debug("Posted \(utf16.count) UTF-16 units via CGEvent Unicode injection.")
+    }
+
+    /// Types text as ordinary hardware-like keystroke pairs (real virtual keys +
+    /// modifiers) posted to the HID stream. Unlike Unicode-payload events (keycode 0),
+    /// plain keystrokes survive the Apple Screen Sharing input relay, which drops the
+    /// payload and degrades such events to their bare keycode (a lone "a"). Characters
+    /// not on the US ANSI layout fall back to Unicode packets (best-effort).
+    private static func postKeyCodes(_ text: String) {
+        let source = CGEventSource(stateID: .combinedSessionState)
+        var pendingUnicode = ""
+        for scalar in text.unicodeScalars {
+            if let (code, flags) = usKey(for: scalar) {
+                if !pendingUnicode.isEmpty {
+                    postUnicodeStatic(pendingUnicode)
+                    pendingUnicode = ""
+                }
+                postKey(code, flags: flags, source: source)
+                usleep(1_000)
+            } else {
+                pendingUnicode.unicodeScalars.append(scalar)
+            }
+        }
+        if !pendingUnicode.isEmpty {
+            postUnicodeStatic(pendingUnicode)
+        }
+    }
+
+    private static func postKey(_ code: CGKeyCode, flags: CGEventFlags, source: CGEventSource?) {
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false) else { return }
+        down.flags = flags
+        up.flags = flags
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
+    }
+
+    /// US ANSI virtual-key map. Non-US layouts map the ASCII basics identically;
+    /// anything outside falls back to Unicode packets.
+    private static func usKey(for scalar: UnicodeScalar) -> (CGKeyCode, CGEventFlags)? {
+        let shift: CGEventFlags = .maskShift
+        switch scalar {
+        case "a": return (CGKeyCode(kVK_ANSI_A), [])
+        case "b": return (CGKeyCode(kVK_ANSI_B), [])
+        case "c": return (CGKeyCode(kVK_ANSI_C), [])
+        case "d": return (CGKeyCode(kVK_ANSI_D), [])
+        case "e": return (CGKeyCode(kVK_ANSI_E), [])
+        case "f": return (CGKeyCode(kVK_ANSI_F), [])
+        case "g": return (CGKeyCode(kVK_ANSI_G), [])
+        case "h": return (CGKeyCode(kVK_ANSI_H), [])
+        case "i": return (CGKeyCode(kVK_ANSI_I), [])
+        case "j": return (CGKeyCode(kVK_ANSI_J), [])
+        case "k": return (CGKeyCode(kVK_ANSI_K), [])
+        case "l": return (CGKeyCode(kVK_ANSI_L), [])
+        case "m": return (CGKeyCode(kVK_ANSI_M), [])
+        case "n": return (CGKeyCode(kVK_ANSI_N), [])
+        case "o": return (CGKeyCode(kVK_ANSI_O), [])
+        case "p": return (CGKeyCode(kVK_ANSI_P), [])
+        case "q": return (CGKeyCode(kVK_ANSI_Q), [])
+        case "r": return (CGKeyCode(kVK_ANSI_R), [])
+        case "s": return (CGKeyCode(kVK_ANSI_S), [])
+        case "t": return (CGKeyCode(kVK_ANSI_T), [])
+        case "u": return (CGKeyCode(kVK_ANSI_U), [])
+        case "v": return (CGKeyCode(kVK_ANSI_V), [])
+        case "w": return (CGKeyCode(kVK_ANSI_W), [])
+        case "x": return (CGKeyCode(kVK_ANSI_X), [])
+        case "y": return (CGKeyCode(kVK_ANSI_Y), [])
+        case "z": return (CGKeyCode(kVK_ANSI_Z), [])
+        case "0": return (CGKeyCode(kVK_ANSI_0), [])
+        case "1": return (CGKeyCode(kVK_ANSI_1), [])
+        case "2": return (CGKeyCode(kVK_ANSI_2), [])
+        case "3": return (CGKeyCode(kVK_ANSI_3), [])
+        case "4": return (CGKeyCode(kVK_ANSI_4), [])
+        case "5": return (CGKeyCode(kVK_ANSI_5), [])
+        case "6": return (CGKeyCode(kVK_ANSI_6), [])
+        case "7": return (CGKeyCode(kVK_ANSI_7), [])
+        case "8": return (CGKeyCode(kVK_ANSI_8), [])
+        case "9": return (CGKeyCode(kVK_ANSI_9), [])
+        case " ": return (CGKeyCode(kVK_Space), [])
+        case "\n": return (CGKeyCode(kVK_Return), [])
+        case "\t": return (CGKeyCode(kVK_Tab), [])
+        case "-": return (CGKeyCode(kVK_ANSI_Minus), [])
+        case "=": return (CGKeyCode(kVK_ANSI_Equal), [])
+        case "[": return (CGKeyCode(kVK_ANSI_LeftBracket), [])
+        case "]": return (CGKeyCode(kVK_ANSI_RightBracket), [])
+        case "\\": return (CGKeyCode(kVK_ANSI_Backslash), [])
+        case ";": return (CGKeyCode(kVK_ANSI_Semicolon), [])
+        case "'": return (CGKeyCode(kVK_ANSI_Quote), [])
+        case ",": return (CGKeyCode(kVK_ANSI_Comma), [])
+        case ".": return (CGKeyCode(kVK_ANSI_Period), [])
+        case "/": return (CGKeyCode(kVK_ANSI_Slash), [])
+        case "`": return (CGKeyCode(kVK_ANSI_Grave), [])
+        case "!": return (CGKeyCode(kVK_ANSI_1), shift)
+        case "@": return (CGKeyCode(kVK_ANSI_2), shift)
+        case "#": return (CGKeyCode(kVK_ANSI_3), shift)
+        case "$": return (CGKeyCode(kVK_ANSI_4), shift)
+        case "%": return (CGKeyCode(kVK_ANSI_5), shift)
+        case "^": return (CGKeyCode(kVK_ANSI_6), shift)
+        case "&": return (CGKeyCode(kVK_ANSI_7), shift)
+        case "*": return (CGKeyCode(kVK_ANSI_8), shift)
+        case "(": return (CGKeyCode(kVK_ANSI_9), shift)
+        case ")": return (CGKeyCode(kVK_ANSI_0), shift)
+        case "_": return (CGKeyCode(kVK_ANSI_Minus), shift)
+        case "+": return (CGKeyCode(kVK_ANSI_Equal), shift)
+        case "{": return (CGKeyCode(kVK_ANSI_LeftBracket), shift)
+        case "}": return (CGKeyCode(kVK_ANSI_RightBracket), shift)
+        case "|": return (CGKeyCode(kVK_ANSI_Backslash), shift)
+        case ":": return (CGKeyCode(kVK_ANSI_Semicolon), shift)
+        case "\"": return (CGKeyCode(kVK_ANSI_Quote), shift)
+        case "<": return (CGKeyCode(kVK_ANSI_Comma), shift)
+        case ">": return (CGKeyCode(kVK_ANSI_Period), shift)
+        case "?": return (CGKeyCode(kVK_ANSI_Slash), shift)
+        case "~": return (CGKeyCode(kVK_ANSI_Grave), shift)
+        default:
+            if scalar.value >= 65, scalar.value <= 90,
+               let lower = UnicodeScalar(scalar.value + 32) {
+                if let mapped = usKey(for: lower) {
+                    return (mapped.0, shift)
+                }
+            }
+            return nil
+        }
     }
 
     /// Pastes current clipboard content to the frontmost application
