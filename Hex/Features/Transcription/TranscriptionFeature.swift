@@ -280,6 +280,10 @@ private extension TranscriptionFeature {
         guard ready else { continue }
         do {
           try await transcription.prewarm(model)
+          let tapOK = await keyEventMonitor.checkTapHealth()
+          if !tapOK {
+            transcriptionFeatureLogger.error("Keep-warm: event tap unresponsive even after rebuild attempt")
+          }
         } catch {
           transcriptionFeatureLogger.error("Keep-warm prewarm failed model=\(model): \(error.localizedDescription)")
         }

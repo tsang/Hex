@@ -57,11 +57,18 @@ struct KeyEventMonitorClient {
   var handleInputEvent: @Sendable (@Sendable @escaping (InputEvent) -> Bool) -> KeyEventMonitorToken = { _ in .noop }
   var startMonitoring: @Sendable () async -> Void = {}
   var stopMonitoring: @Sendable () -> Void = {}
+  /// Verifies the event tap is actually receiving events (round-trip probe). Rebuilds the
+  /// tap once automatically if the probe goes unacknowledged. Returns final liveness.
+  var checkTapHealth: @Sendable () async -> Bool = { true }
+  /// Forces teardown + recreation of the event tap and verifies with a probe (menu action).
+  var forceReconnect: @Sendable () async -> Bool = { true }
 }
 
 extension KeyEventMonitorClient: DependencyKey {
   static var liveValue: KeyEventMonitorClient {
-    let live = KeyEventMonitorClientLive()
+    // One process-wide tap owner: a second live instance would either double-handle key
+    // events or race over monitoring state.
+    let live = KeyEventMonitorClientLive.shared
     return KeyEventMonitorClient(
       listenForKeyPress: {
         live.listenForKeyPress()
@@ -77,6 +84,12 @@ extension KeyEventMonitorClient: DependencyKey {
       },
       stopMonitoring: {
         live.stopMonitoring()
+      },
+      checkTapHealth: {
+        await live.checkTapHealth()
+      },
+      forceReconnect: {
+        await live.forceReconnect()
       }
     )
   }
@@ -91,6 +104,16 @@ extension DependencyValues {
 
 class KeyEventMonitorClientLive {
   private var eventTapPort: CFMachPort?
+
+  /// Process-wide instance: HID event taps are global per process; exactly one owner.
+  static let shared = KeyEventMonitorClientLive()
+
+  /// Magic value written into synthetic probe events' userData; only our callback checks it.
+  private static let tapProbeMagic: Int64 = 0x4B45_4E5F_5441_5001
+
+  private var lastTapProbeAck: Date?
+
+  @Shared(.tapHealth) private var tapHealth: TapHealthState
   private var runLoopSource: CFRunLoopSource?
   private var continuations: [UUID: @Sendable (KeyEvent) -> Bool] = [:]
   private var inputContinuations: [UUID: @Sendable (InputEvent) -> Bool] = [:]
@@ -388,6 +411,13 @@ class KeyEventMonitorClientLive {
             return Unmanaged.passUnretained(cgEvent)
           }
 
+          // Health probe round-trip: our own synthetic flagsChanged carries magic userData.
+          if type == .flagsChanged,
+             cgEvent.getIntegerValueField(.eventSourceUserData) == KeyEventMonitorClientLive.tapProbeMagic {
+            hotKeyClientLive.confirmTapProbe()
+            return nil // swallow the phantom probe so it never reaches other apps
+          }
+
           if type == .tapDisabledByUserInput || type == .tapDisabledByTimeout {
             hotKeyClientLive.handleTapDisabledEvent(type)
             return Unmanaged.passUnretained(cgEvent)
@@ -426,6 +456,9 @@ class KeyEventMonitorClientLive {
     CGEvent.tapEnable(tap: eventTap, enable: true)
     isMonitoring = true
     logger.info("Started monitoring key events via CGEvent tap (reason: \(reason)).")
+    // Confirm liveness immediately so the menu bar never reports "unresponsive" for a tap
+    // that was just created; heartbeat re-verifies every cycle thereafter.
+    postTapProbe()
   }
 
   @MainActor
@@ -448,10 +481,13 @@ class KeyEventMonitorClientLive {
 
   private func handleTapDisabledEvent(_ type: CGEventType) {
     let reason = type == .tapDisabledByTimeout ? "timeout" : "userInput"
-    logger.error("Event tap disabled by \(reason); scheduling restart.")
+    logger.error("Event tap disabled by \(reason); rebuilding tap.")
     Task { [weak self] in
       guard let self else { return }
-      await self.refreshMonitoringState(reason: "tap_disabled_\(reason)")
+      // isMonitoring must go false before refresh: activateTapIfNeeded early-returns while
+      // it is true, which left timeout-disabled taps permanently deaf.
+      await MainActor.run { self.deactivateTap(reason: "disabled_\(reason)") }
+      await self.refreshMonitoringState(reason: "disabled_\(reason)")
     }
   }
 
@@ -471,6 +507,72 @@ class KeyEventMonitorClientLive {
 
   private func processInputEvent(_ inputEvent: InputEvent) -> Bool {
     processEvent(inputEvent, handlers: inputContinuations)
+  }
+
+  // MARK: - Tap Liveness Probing
+
+  /// Posts a synthetic probe and confirms the tap callback sees it; rebuilds the tap once if
+  /// not. Callers (keep-warm heartbeat) use the returned Bool for logging/menu telemetry.
+  func checkTapHealth() async -> Bool {
+    guard desiredMonitoringState() else { return true }
+    if await verifyProbe() { return true }
+    logger.error("Tap probe not acknowledged; rebuilding event tap.")
+    await MainActor.run { self.forceRebuildTap() }
+    try? await Task.sleep(nanoseconds: 500_000_000)
+    let ok = await verifyProbe()
+    if ok { logger.notice("Event tap rebuilt and probe acknowledged.") }
+    else { logger.fault("Event tap rebuild failed probe; hotkeys may be unresponsive.") }
+    return ok
+  }
+
+  /// Teardown + recreate unconditionally, then verify (menu-triggered reconnect).
+  func forceReconnect() async -> Bool {
+    logger.notice("Manual event tap reconnect requested.")
+    await MainActor.run { self.forceRebuildTap() }
+    try? await Task.sleep(nanoseconds: 500_000_000)
+    let ok = await verifyProbe()
+    if ok { logger.notice("Manual reconnect confirmed live.") }
+    else { logger.fault("Manual reconnect probe failed.") }
+    return ok
+  }
+
+  private func verifyProbe() async -> Bool {
+    let before = queue.sync { self.lastTapProbeAck }
+    postTapProbe()
+    try? await Task.sleep(nanoseconds: 1_500_000_000)
+    let acked = queue.sync { self.lastTapProbeAck } != before
+    if acked { logger.info("Tap probe acknowledged.") }
+    return acked
+  }
+
+  @MainActor
+  private func forceRebuildTap() {
+    deactivateTap(reason: "forced_rebuild")
+    $tapHealth.withLock { state in
+      state.lastReconnectAt = Date()
+      state.reconnectCount += 1
+      state.tapHealthy = false
+    }
+    refreshTrustedFlag(promptIfUntrusted: false)
+    activateTapIfNeeded(reason: "forced_rebuild")
+  }
+
+  private func postTapProbe() {
+    guard desiredMonitoringState() else { return }
+    guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 58, keyDown: true) else { return }
+    event.flags = .maskAlternate
+    event.setIntegerValueField(.eventSourceUserData, value: Self.tapProbeMagic)
+    event.post(tap: .cghidEventTap)
+  }
+
+  fileprivate func confirmTapProbe() {
+    queue.async(flags: .barrier) { [weak self] in
+      self?.lastTapProbeAck = Date()
+    }
+    $tapHealth.withLock { state in
+      state.lastTapAckAt = Date()
+      state.tapHealthy = true
+    }
   }
 }
 

@@ -19,6 +19,9 @@ struct HexApp: App {
             // Copy last transcript to clipboard
             MenuBarCopyLastTranscriptButton()
 
+            // Liveness: shows last successful model warm; click forces tap rebuild + rewarm.
+            MenuBarReconnectHotkeyButton()
+
             Button("Settings...") {
                 appDelegate.presentSettingsView()
             }.keyboardShortcut(",")

@@ -6,6 +6,7 @@
 //
 
 import AVFoundation
+import ComposableArchitecture
 import Dependencies
 import DependenciesMacros
 import Foundation
@@ -83,6 +84,8 @@ actor TranscriptionClientLive {
 
   /// Process-wide instance so heavy model weights are never held by more than one live client.
   static let shared = TranscriptionClientLive()
+
+  @Shared(.tapHealth) private var tapHealth: TapHealthState
 
   /// The base folder under which we store model data (e.g., ~/Library/Application Support/...).
   private lazy var modelsBaseFolder: URL = {
@@ -311,20 +314,68 @@ actor TranscriptionClientLive {
   /// keep weights and ANE/GPU state resident between user recordings.
   func prewarm(model: String) async throws {
     let start = Date()
-    if isParakeet(model) {
-      try await parakeet.ensureLoaded(modelName: model) { _ in }
-      _ = try await parakeet.transcribe(Self.silentClipURL())
-    } else {
-      let variant = await resolveVariant(model)
-      if whisperKit == nil || currentModelName != variant {
-        try await downloadAndLoadModel(variant: variant) { _ in }
+    let health = $tapHealth
+    health.withLock { $0.loadProgress = 0.01 }
+    do {
+      if isParakeet(model) {
+        try await parakeet.ensureLoaded(modelName: model) { p in
+          health.withLock { $0.loadProgress = p.fractionCompleted }
+        }
+        _ = try await parakeet.transcribe(Self.silentClipURL())
+      } else {
+        let variant = await resolveVariant(model)
+        if whisperKit == nil || currentModelName != variant {
+          try await downloadAndLoadModel(variant: variant) { p in
+            health.withLock { $0.loadProgress = p.fractionCompleted }
+          }
+        }
+        guard let whisperKit else {
+          health.withLock { $0.loadProgress = nil }
+          return
+        }
+        _ = try await whisperKit.transcribe(audioPath: Self.silentClipURL().path, decodeOptions: DecodingOptions())
       }
-      guard let whisperKit else { return }
-      _ = try await whisperKit.transcribe(audioPath: Self.silentClipURL().path, decodeOptions: DecodingOptions())
+      let mem = Self.sampleMemory()
+      health.withLock { state in
+        state.lastWarmAt = Date()
+        state.loadProgress = nil
+        state.physFootprintBytes = mem.footprint
+        state.residentBytes = mem.resident
+      }
+      transcriptionLogger.info("Prewarm complete model=\(model) took \(String(format: "%.2f", Date().timeIntervalSince(start)))s footprintMB=\(mem.footprint / 1_048_576) residentMB=\(mem.resident / 1_048_576)")
+    } catch {
+      health.withLock { $0.loadProgress = nil }
+      throw error
     }
-    transcriptionLogger.info("Prewarm complete model=\(model) took \(String(format: "%.2f", Date().timeIntervalSince(start)))s")
   }
 
+
+  /// Task-level memory stats: billed footprint + resident size (which includes the file-backed
+  /// model cache). Sampled during prewarm so the menu bar gets live usage for free.
+  private static func sampleMemory() -> (footprint: UInt64, resident: UInt64) {
+    var footprint: UInt64 = 0
+    var resident: UInt64 = 0
+
+    var vm = task_vm_info_data_t()
+    var vmCount = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.stride / MemoryLayout<natural_t>.stride)
+    let vmKr = withUnsafeMutablePointer(to: &vm) { ptr in
+      ptr.withMemoryRebound(to: integer_t.self, capacity: Int(vmCount)) {
+        task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &vmCount)
+      }
+    }
+    if vmKr == KERN_SUCCESS { footprint = vm.phys_footprint }
+
+    var basic = mach_task_basic_info_data_t()
+    var basicCount = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info_data_t>.stride / MemoryLayout<natural_t>.stride)
+    let basicKr = withUnsafeMutablePointer(to: &basic) { ptr in
+      ptr.withMemoryRebound(to: integer_t.self, capacity: Int(basicCount)) {
+        task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &basicCount)
+      }
+    }
+    if basicKr == KERN_SUCCESS { resident = basic.resident_size }
+
+    return (footprint, resident)
+  }
   // MARK: - Private Helpers
 
   /// Resolve wildcard patterns (e.g. "distil*large-v3") to a concrete model name.
